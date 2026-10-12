@@ -14,9 +14,22 @@
 
 </div>
 
-<!-- یک اسکرین‌شات در docs/screenshot.png بگذارید و خط زیر را از کامنت دربیاورید
-<p align="center"><img src="docs/screenshot.png" width="360" alt="Panel screenshot"></p>
--->
+<div align="center">
+<table>
+  <tr>
+    <td align="center"><img src="docs/1pic.PNG" width="220" alt="Account tab"></td>
+    <td align="center"><img src="docs/2pic.PNG" width="220" alt="Setup tab"></td>
+    <td align="center"><img src="docs/3pic.PNG" width="220" alt="Trade tab"></td>
+    <td align="center"><img src="docs/4pic.PNG" width="220" alt="Manage tab"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>ACCOUNT</b><br><sub>آمار زنده و نوار محدودیت‌ها</sub></td>
+    <td align="center"><b>SETUP</b><br><sub>ریسک، SL، R:R و حجم</sub></td>
+    <td align="center"><b>TRADE</b><br><sub>سفارش مارکت و پندینگ</sub></td>
+    <td align="center"><b>MANAGE</b><br><sub>بریک‌ایون، پارشیال و بستن</sub></td>
+  </tr>
+</table>
+</div>
 
 ---
 
