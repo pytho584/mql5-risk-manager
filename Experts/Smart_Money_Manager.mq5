@@ -3,9 +3,9 @@
 //|   Risk-based sizing + market/pending orders + protection + panel |
 //+------------------------------------------------------------------+
 #property copyright "Smart Money Manager"
-#property version   "2.20"
+#property version   "2.30"
 #property description "Advanced money management EA with a modern on-chart panel."
-#property description "Market + Limit + Stop orders, chart preview lines, risk-% lot sizing,"
+#property description "Market + Limit + Stop orders, drag-and-drop SL/TP chart tool, risk-% lot sizing,"
 #property description "daily loss/profit limits, drawdown guard, loss streak lock, open-risk cap,"
 #property description "trading hours / spread / news filters, break-even, trailing, partial close."
 
@@ -36,6 +36,12 @@ input double InpFixedLot         = 0.0;    // Fixed lot (0 = auto from risk %)
 input group "=== Pending Orders ==="
 input int    InpEntryDistance    = 200;    // Pending distance from price (points)
 input int    InpExpiryMinutes    = 0;      // Pending expiry (minutes, 0 = GTC)
+
+input group "=== Chart Tool ==="
+input bool   InpUseChartTool     = true;   // Drag entry/SL/TP on the chart before placing
+input int    InpZoneBars         = 25;     // Zone width (bars)
+input color  InpColZoneTP        = C'16,64,52';  // Reward zone color
+input color  InpColZoneSL        = C'72,26,34';  // Risk zone color
 
 input group "=== Account Limits (0 = off) ==="
 input double InpMaxDailyLossPct  = 3.0;    // Max daily loss (% of day-start balance)
@@ -119,7 +125,11 @@ int    gCurTab     = -1;     // tab currently being built
 int    gTabH[4];             // panel height per tab
 string gObjs[];              // registered panel objects
 int    gObjTab[];            // tab index of each registered object
-int    gPrev       = 0;      // preview mode: 0 off, 1 BUY, 2 SELL, 3 BUY LIMIT, 4 SELL LIMIT, 5 BUY STOP, 6 SELL STOP
+bool   gUseTool    = true;   // chart tool on/off
+bool   gArmed      = false;  // an order plan is on the chart
+bool   gTpOn       = true;   // plan has a take profit
+ENUM_ORDER_TYPE gPlanType = ORDER_TYPE_BUY;
+double gPlanEntry  = 0;
 
 //--- daily statistics (cached)
 double gRealized   = 0;
@@ -236,15 +246,6 @@ void ApplyTab()
       ObjectSetInteger(0,gObjs[i],OBJPROP_TIMEFRAMES,vis? OBJ_ALL_PERIODS : OBJ_NO_PERIODS);
      }
 
-   // chart preview lines follow the minimize state
-   int total=ObjectsTotal(0,0,-1);
-   for(int i=0;i<total;i++)
-     {
-      string n=ObjectName(0,i,0,-1);
-      if(StringFind(n,PFX+"pv_")!=0) continue;
-      ObjectSetInteger(0,n,OBJPROP_TIMEFRAMES,gMin? OBJ_NO_PERIODS : OBJ_ALL_PERIODS);
-     }
-
    // tab button colors
    for(int k=0;k<4;k++)
      {
@@ -284,7 +285,7 @@ void BuildPanel()
    Rect("hdr",x,y,PW,46,C_HEADER,C_HEADER);
    Rect("hdr_line",x,y+46,PW,2,C_ACCENT,C_ACCENT);
    Lbl("title",x+pad,y+7,"SMART MONEY MANAGER",C_TEXT,11,"Segoe UI Semibold");
-   Lbl("sub",x+pad,y+26,_Symbol+"  |  Risk Engine v2.2",C_MUTED,8);
+   Lbl("sub",x+pad,y+26,_Symbol+"  |  Risk Engine v2.3",C_MUTED,8);
    Btn("btn_min",x+PW-38,y+10,26,26,"–",C_BTN,C_TEXT,11);
    Lbl("dot",x+PW-48,y+13,"●",C_ACCENT,14,"Segoe UI",ANCHOR_RIGHT_UPPER);
 
@@ -363,18 +364,23 @@ void BuildPanel()
    Lbl("v_rw",x+PW-pad-4,cy+27,"-",C_BUY,9,"Segoe UI Semibold",ANCHOR_RIGHT_UPPER);
    cy+=68;
 
-   Btn("btn_prev",x+pad,cy,inner,28,"Preview lines: OFF",C_BTN,C_MUTED,9);
+   Btn("btn_tool",x+pad,cy,inner,28,gUseTool? "Chart tool (drag SL / TP): ON" : "Chart tool (drag SL / TP): OFF",C_BTN,gUseTool? C_ENTRY : C_MUTED,9);
    cy+=40;
    gTabH[1]=cy-y;
 
    // ================= TAB 2 : TRADE =================
    gCurTab=2;
    cy=top;
-   Rect("c4",x+pad-4,cy-4,inner+8,32,C_CARD,C_BORDER);
-   Lbl("v_lot2",x+pad+4,cy+3,"-",C_ACCENT,9,"Segoe UI Semibold");
-   Lbl("v_rk2",x+PW/2,cy+3,"-",C_SELL,9,"Segoe UI Semibold",ANCHOR_UPPER);
-   Lbl("v_rw2",x+PW-pad-4,cy+3,"-",C_BUY,9,"Segoe UI Semibold",ANCHOR_RIGHT_UPPER);
-   cy+=44;
+   Rect("c4",x+pad-4,cy-4,inner+8,50,C_CARD,C_BORDER);
+   Lbl("v_plan1",x+pad+4,cy+2,"No active order plan",C_MUTED,10,"Segoe UI Semibold");
+   Lbl("v_plan2",x+pad+4,cy+26,"Choose an order type below, then drag SL / TP",C_MUTED,8);
+   cy+=62;
+
+   int pw1=150, pw3=68, pw2=inner-pw1-pw3-12;
+   Btn("btn_place",x+pad,cy,pw1,34,"PLACE ORDER",C_BAR_BG,C_MUTED,10);
+   Btn("btn_cancel",x+pad+pw1+6,cy,pw2,34,"CANCEL",C_BAR_BG,C_MUTED,9);
+   Btn("btn_tp",x+pad+pw1+pw2+12,cy,pw3,34,"TP ON",C_BAR_BG,C_MUTED,9);
+   cy+=48;
 
    Lbl("h_mkt",x+pad,cy,"MARKET",C_ACCENT,8,"Segoe UI Semibold");
    cy+=16;
@@ -447,7 +453,7 @@ double TickValueLoss()
    return tv;
   }
 
-double LossPerLot(int slPts)
+double LossPerLot(double slPts)
   {
    double tv=TickValueLoss();
    double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
@@ -460,12 +466,26 @@ double RiskMoney()
    return AccountInfoDouble(ACCOUNT_BALANCE)*gRisk/100.0;
   }
 
-double CalcLot()
+double ProfitPerLot(double pts)
+  {
+   double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE_PROFIT);
+   if(tv<=0) tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   if(ts<=0) ts=_Point;
+   return pts*_Point/ts*tv;
+  }
+
+double CalcLotPts(double pts)
   {
    if(gLotFix>0) return NormalizeLot(gLotFix);
-   double lpl=LossPerLot(gSL);
+   double lpl=LossPerLot(pts);
    if(lpl<=0) return 0;
    return NormalizeLot(RiskMoney()/lpl);
+  }
+
+double CalcLot()
+  {
+   return CalcLotPts(gSL);
   }
 
 //+------------------------------------------------------------------+
@@ -691,12 +711,10 @@ void CheckLimits(double todayTotal,double dayStartBal,double ddPct)
   }
 
 //+------------------------------------------------------------------+
-//| Pre-trade checks shared by market and pending orders             |
+//| Gate checks shared by every order                                |
 //+------------------------------------------------------------------+
-bool PreChecks(double &lot)
+bool CanTrade()
   {
-   UpdateStats(true);
-
    if(gLocked)
      { SetStatus("Locked: "+gLockReason,C_SELL); return false; }
 
@@ -706,23 +724,6 @@ bool PreChecks(double &lot)
 
    if(CountPositions()+CountPendings()>=InpMaxPositions)
      { SetStatus("Max trades reached ("+IntegerToString(InpMaxPositions)+")",C_WARN); return false; }
-
-   long stopsLvl=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
-   long spread=SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
-   if(gSL<=stopsLvl+spread)
-     { SetStatus("SL too small for this symbol",C_WARN); return false; }
-
-   lot=CalcLot();
-   if(lot<=0)
-     { SetStatus("Lot calculation failed",C_SELL); return false; }
-
-   if(InpMaxOpenRiskPct>0)
-     {
-      double cap=AccountInfoDouble(ACCOUNT_BALANCE)*InpMaxOpenRiskPct/100.0;
-      double after=OpenRiskMoney()+lot*LossPerLot(gSL);
-      if(after>cap)
-        { SetStatus("Open risk limit would be exceeded",C_WARN); return false; }
-     }
    return true;
   }
 
@@ -777,61 +778,88 @@ double PendingPrice(ENUM_ORDER_TYPE type)
   }
 
 //+------------------------------------------------------------------+
-//| Market orders                                                    |
+//| Order execution (market + pending) with explicit levels          |
 //+------------------------------------------------------------------+
-void OpenTrade(bool buy)
+string PendingError(ENUM_ORDER_TYPE t,double entry)
   {
-   double lot=0;
-   if(!PreChecks(lot)) return;
-
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double price=buy? ask:bid;
-   if(!MarginOK(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,lot,price)) return;
-
-   int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
-   double sl=buy? price-gSL*_Point : price+gSL*_Point;
-   double tp=0;
-   if(gRR>0) tp=buy? price+gSL*gRR*_Point : price-gSL*gRR*_Point;
-   sl=NormalizeDouble(sl,dg);
-   if(tp>0) tp=NormalizeDouble(tp,dg);
-
-   trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(InpSlippage);
-   bool ok=buy? trade.Buy(lot,_Symbol,0,sl,tp,"SMM") : trade.Sell(lot,_Symbol,0,sl,tp,"SMM");
-
-   if(ok && (trade.ResultRetcode()==TRADE_RETCODE_DONE || trade.ResultRetcode()==TRADE_RETCODE_PLACED))
+   double lvl=(double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
+   switch(t)
      {
-      SetStatus((buy?"BUY ":"SELL ")+DoubleToString(lot,2)+" lots opened",C_ACCENT);
-      UpdateStats(true);
+      case ORDER_TYPE_BUY_LIMIT:  if(entry>ask-lvl) return "Buy Limit must be below price";  break;
+      case ORDER_TYPE_BUY_STOP:   if(entry<ask+lvl) return "Buy Stop must be above price";   break;
+      case ORDER_TYPE_SELL_LIMIT: if(entry<bid+lvl) return "Sell Limit must be above price"; break;
+      case ORDER_TYPE_SELL_STOP:  if(entry>bid-lvl) return "Sell Stop must be below price";  break;
+      default: break;
      }
-   else
-      SetStatus("Order failed: "+trade.ResultRetcodeDescription(),C_SELL);
+   return "";
   }
 
-//+------------------------------------------------------------------+
-//| Pending orders (Limit / Stop)                                    |
-//+------------------------------------------------------------------+
-void OpenPending(ENUM_ORDER_TYPE type)
+//--- default entry / SL / TP from the panel values
+void DefaultLevels(ENUM_ORDER_TYPE t,double &entry,double &sl,double &tp)
   {
-   double lot=0;
-   if(!PreChecks(lot)) return;
+   int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   bool buy=IsBuyType(t);
+   if(t==ORDER_TYPE_BUY)       entry=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   else if(t==ORDER_TYPE_SELL) entry=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   else                        entry=PendingPrice(t);
+   double rr=(gRR>0)? gRR : 2.0;
+   sl=NormalizeDouble(buy? entry-gSL*_Point : entry+gSL*_Point,dg);
+   tp=NormalizeDouble(buy? entry+gSL*rr*_Point : entry-gSL*rr*_Point,dg);
+  }
 
-   long stopsLvl=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
-   if(gDist<=stopsLvl)
-     { SetStatus("Distance must be > "+IntegerToString((int)stopsLvl)+" pts",C_WARN); return; }
+//--- validate everything and send the order. tp = 0 means no take profit.
+bool ExecutePlan(ENUM_ORDER_TYPE type,double entry,double sl,double tp)
+  {
+   UpdateStats(true);
+   if(!CanTrade()) return false;
 
    int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   long stopsLvl=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+   long spread=SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
    bool buy=IsBuyType(type);
-   double price=PendingPrice(type);
-   if(price<=0) { SetStatus("Invalid entry price",C_SELL); return; }
-   if(!MarginOK(type,lot,price)) return;
+   bool mkt=(type==ORDER_TYPE_BUY || type==ORDER_TYPE_SELL);
 
-   double sl=buy? price-gSL*_Point : price+gSL*_Point;
-   double tp=0;
-   if(gRR>0) tp=buy? price+gSL*gRR*_Point : price-gSL*gRR*_Point;
+   if(mkt) entry=SymbolInfoDouble(_Symbol,buy? SYMBOL_ASK : SYMBOL_BID);
+   else
+     {
+      string pe=PendingError(type,entry);
+      if(pe!="") { SetStatus(pe,C_WARN); return false; }
+     }
+
+   entry=NormalizeDouble(entry,dg);
    sl=NormalizeDouble(sl,dg);
    if(tp>0) tp=NormalizeDouble(tp,dg);
+
+   if(buy)
+     {
+      if(sl>=entry)          { SetStatus("SL must be below entry",C_WARN); return false; }
+      if(tp>0 && tp<=entry)  { SetStatus("TP must be above entry",C_WARN); return false; }
+     }
+   else
+     {
+      if(sl<=entry)          { SetStatus("SL must be above entry",C_WARN); return false; }
+      if(tp>0 && tp>=entry)  { SetStatus("TP must be below entry",C_WARN); return false; }
+     }
+
+   double slPts=MathAbs(entry-sl)/_Point;
+   if(slPts<=(double)stopsLvl+(mkt? (double)spread : 0.0))
+     { SetStatus("SL too close to entry",C_WARN); return false; }
+   if(tp>0 && MathAbs(tp-entry)/_Point<=(double)stopsLvl)
+     { SetStatus("TP too close to entry",C_WARN); return false; }
+
+   double lot=CalcLotPts(slPts);
+   if(lot<=0)
+     { SetStatus("Lot calculation failed",C_SELL); return false; }
+
+   if(InpMaxOpenRiskPct>0)
+     {
+      double cap=AccountInfoDouble(ACCOUNT_BALANCE)*InpMaxOpenRiskPct/100.0;
+      if(OpenRiskMoney()+lot*LossPerLot(slPts)>cap)
+        { SetStatus("Open risk limit would be exceeded",C_WARN); return false; }
+     }
+   if(!MarginOK(type,lot,entry)) return false;
 
    ENUM_ORDER_TYPE_TIME tt=(gExpiry>0)? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
    datetime exp=(gExpiry>0)? TimeCurrent()+gExpiry*60 : 0;
@@ -841,17 +869,32 @@ void OpenPending(ENUM_ORDER_TYPE type)
    bool ok=false;
    switch(type)
      {
-      case ORDER_TYPE_BUY_LIMIT:  ok=trade.BuyLimit(lot,price,_Symbol,sl,tp,tt,exp,"SMM");  break;
-      case ORDER_TYPE_BUY_STOP:   ok=trade.BuyStop(lot,price,_Symbol,sl,tp,tt,exp,"SMM");   break;
-      case ORDER_TYPE_SELL_LIMIT: ok=trade.SellLimit(lot,price,_Symbol,sl,tp,tt,exp,"SMM"); break;
-      case ORDER_TYPE_SELL_STOP:  ok=trade.SellStop(lot,price,_Symbol,sl,tp,tt,exp,"SMM");  break;
+      case ORDER_TYPE_BUY:        ok=trade.Buy(lot,_Symbol,0,sl,tp,"SMM");                      break;
+      case ORDER_TYPE_SELL:       ok=trade.Sell(lot,_Symbol,0,sl,tp,"SMM");                     break;
+      case ORDER_TYPE_BUY_LIMIT:  ok=trade.BuyLimit(lot,entry,_Symbol,sl,tp,tt,exp,"SMM");      break;
+      case ORDER_TYPE_BUY_STOP:   ok=trade.BuyStop(lot,entry,_Symbol,sl,tp,tt,exp,"SMM");       break;
+      case ORDER_TYPE_SELL_LIMIT: ok=trade.SellLimit(lot,entry,_Symbol,sl,tp,tt,exp,"SMM");     break;
+      case ORDER_TYPE_SELL_STOP:  ok=trade.SellStop(lot,entry,_Symbol,sl,tp,tt,exp,"SMM");      break;
       default: break;
      }
 
    if(ok && (trade.ResultRetcode()==TRADE_RETCODE_DONE || trade.ResultRetcode()==TRADE_RETCODE_PLACED))
-      SetStatus(OrderName(type)+" "+DoubleToString(lot,2)+" @ "+DoubleToString(price,dg),C_ACCENT);
-   else
-      SetStatus("Pending failed: "+trade.ResultRetcodeDescription(),C_SELL);
+     {
+      SetStatus(OrderName(type)+" "+DoubleToString(lot,2)+" lots @ "+DoubleToString(mkt? trade.ResultPrice() : entry,dg),C_ACCENT);
+      UpdateStats(true);
+      return true;
+     }
+   SetStatus("Order failed: "+trade.ResultRetcodeDescription(),C_SELL);
+   return false;
+  }
+
+//--- instant order (used when the chart tool is switched off)
+void QuickOrder(ENUM_ORDER_TYPE t)
+  {
+   double e,sl,tp;
+   DefaultLevels(t,e,sl,tp);
+   if(gRR<=0) tp=0;
+   ExecutePlan(t,e,sl,tp);
   }
 
 void DeletePendings()
@@ -1004,63 +1047,9 @@ void ManagePositions()
   }
 
 //+------------------------------------------------------------------+
-//| Chart preview lines (entry / SL / TP before clicking)            |
+//| Chart tool: draggable entry / SL / TP with risk & reward zones   |
 //+------------------------------------------------------------------+
-string PrevLabel()
-  {
-   switch(gPrev)
-     {
-      case 1: return "BUY";
-      case 2: return "SELL";
-      case 3: return "BUY LIMIT";
-      case 4: return "SELL LIMIT";
-      case 5: return "BUY STOP";
-      case 6: return "SELL STOP";
-     }
-   return "OFF";
-  }
-
-ENUM_ORDER_TYPE PrevType()
-  {
-   switch(gPrev)
-     {
-      case 1: return ORDER_TYPE_BUY;
-      case 2: return ORDER_TYPE_SELL;
-      case 3: return ORDER_TYPE_BUY_LIMIT;
-      case 4: return ORDER_TYPE_SELL_LIMIT;
-      case 5: return ORDER_TYPE_BUY_STOP;
-      case 6: return ORDER_TYPE_SELL_STOP;
-     }
-   return ORDER_TYPE_BUY;
-  }
-
-void PHLine(string name,double price,color clr,ENUM_LINE_STYLE style)
-  {
-   string n=PFX+name;
-   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_HLINE,0,0,price);
-   ObjectSetDouble(0,n,OBJPROP_PRICE,price);
-   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
-   ObjectSetInteger(0,n,OBJPROP_STYLE,style);
-   ObjectSetInteger(0,n,OBJPROP_WIDTH,1);
-   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
-   ObjectSetInteger(0,n,OBJPROP_BACK,true);
-  }
-
-void PText(string name,datetime t,double price,string txt,color clr)
-  {
-   string n=PFX+name;
-   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_TEXT,0,t,price);
-   ObjectSetInteger(0,n,OBJPROP_TIME,t);
-   ObjectSetDouble(0,n,OBJPROP_PRICE,price);
-   ObjectSetString(0,n,OBJPROP_TEXT,txt);
-   ObjectSetString(0,n,OBJPROP_FONT,"Segoe UI Semibold");
-   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,9);
-   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
-   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_RIGHT_LOWER);
-   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
-  }
+#define TL "SMM_tl_"
 
 string Money(double v)
   {
@@ -1068,51 +1057,239 @@ string Money(double v)
    return (v<0?"-":"")+DoubleToString(MathAbs(v),2)+" "+cur;
   }
 
-void UpdatePreview()
+datetime ToolT1() { return iTime(_Symbol,_Period,0)+PeriodSeconds()*2; }
+datetime ToolT2() { return ToolT1()+PeriodSeconds()*MathMax(5,InpZoneBars); }
+
+double TLinePrice(string name)
   {
-   if(gPrev==0)
+   return ObjectGetDouble(0,TL+name,OBJPROP_PRICE);
+  }
+
+void TLine(string name,double price,color clr,int width,bool drag)
+  {
+   string n=TL+name;
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_HLINE,0,0,price);
+   ObjectSetDouble(0,n,OBJPROP_PRICE,price);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_STYLE,STYLE_SOLID);
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,width);
+   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,drag);
+   ObjectSetInteger(0,n,OBJPROP_SELECTED,drag);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,10);
+  }
+
+void TZone(string name,double p1,double p2,color clr)
+  {
+   string n=TL+name;
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_RECTANGLE,0,ToolT1(),p1,ToolT2(),p2);
+   ObjectSetInteger(0,n,OBJPROP_TIME,0,ToolT1());
+   ObjectSetDouble(0,n,OBJPROP_PRICE,0,p1);
+   ObjectSetInteger(0,n,OBJPROP_TIME,1,ToolT2());
+   ObjectSetDouble(0,n,OBJPROP_PRICE,1,p2);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_FILL,true);
+   ObjectSetInteger(0,n,OBJPROP_BACK,true);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+  }
+
+void TText(string name,double price,string txt,color clr)
+  {
+   string n=TL+name;
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_TEXT,0,ToolT1(),price);
+   ObjectSetInteger(0,n,OBJPROP_TIME,ToolT1());
+   ObjectSetDouble(0,n,OBJPROP_PRICE,price);
+   ObjectSetString(0,n,OBJPROP_TEXT,txt);
+   ObjectSetString(0,n,OBJPROP_FONT,"Segoe UI Semibold");
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,9);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+  }
+
+void ToolDelete()
+  {
+   ObjectsDeleteAll(0,TL);
+  }
+
+//--- panel buttons / card that belong to the plan
+void RefreshPlanUI()
+  {
+   bool a=gArmed;
+   if(!a)
      {
-      ObjectsDeleteAll(0,PFX+"pv_");
-      return;
+      SetTxt("v_plan1","No active order plan",C_MUTED);
+      SetTxt("v_plan2","Choose an order type below, then drag SL / TP",C_MUTED);
      }
+   string bp=PFX+"btn_place", bc=PFX+"btn_cancel", bt=PFX+"btn_tp";
+   ObjectSetInteger(0,bp,OBJPROP_BGCOLOR,a? C_ACCENT : C_BAR_BG);
+   ObjectSetInteger(0,bp,OBJPROP_BORDER_COLOR,a? C_ACCENT : C_BAR_BG);
+   ObjectSetInteger(0,bp,OBJPROP_COLOR,a? C_BG : C_MUTED);
+   ObjectSetInteger(0,bc,OBJPROP_BGCOLOR,a? C_SELL : C_BAR_BG);
+   ObjectSetInteger(0,bc,OBJPROP_BORDER_COLOR,a? C_SELL : C_BAR_BG);
+   ObjectSetInteger(0,bc,OBJPROP_COLOR,a? clrWhite : C_MUTED);
+   ObjectSetString(0,bt,OBJPROP_TEXT,gTpOn? "TP ON" : "TP OFF");
+   ObjectSetInteger(0,bt,OBJPROP_BGCOLOR,a? C_BTN : C_BAR_BG);
+   ObjectSetInteger(0,bt,OBJPROP_BORDER_COLOR,a? C_BTN : C_BAR_BG);
+   ObjectSetInteger(0,bt,OBJPROP_COLOR,a? (gTpOn? C_ACCENT : C_MUTED) : C_MUTED);
+  }
 
-   ENUM_ORDER_TYPE ty=PrevType();
-   bool buy=IsBuyType(ty);
+//--- current entry / SL / TP read from the chart lines
+void PlanLevels(double &e,double &sl,double &tp)
+  {
    int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   bool buy=IsBuyType(gPlanType);
+   bool mkt=(gPlanType==ORDER_TYPE_BUY || gPlanType==ORDER_TYPE_SELL);
+   if(mkt) e=SymbolInfoDouble(_Symbol,buy? SYMBOL_ASK : SYMBOL_BID);
+   else    e=NormalizeDouble(TLinePrice("e"),dg);
+   sl=NormalizeDouble(TLinePrice("sl"),dg);
+   tp=gTpOn? NormalizeDouble(TLinePrice("tp"),dg) : 0;
+  }
 
-   double entry;
-   if(ty==ORDER_TYPE_BUY)       entry=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   else if(ty==ORDER_TYPE_SELL) entry=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   else                         entry=PendingPrice(ty);
-   if(entry<=0) return;
+void UpdateTool()
+  {
+   if(!gArmed) return;
 
-   double sl=NormalizeDouble(buy? entry-gSL*_Point : entry+gSL*_Point,dg);
-   double tp=(gRR>0)? NormalizeDouble(buy? entry+gSL*gRR*_Point : entry-gSL*gRR*_Point,dg) : 0;
-   double lot=CalcLot();
-   double risk=lot*LossPerLot(gSL);
+   int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   bool buy=IsBuyType(gPlanType);
+   bool mkt=(gPlanType==ORDER_TYPE_BUY || gPlanType==ORDER_TYPE_SELL);
 
-   // labels sit at the right edge of the visible chart
-   int first=(int)ChartGetInteger(0,CHART_FIRST_VISIBLE_BAR);
-   int vis=(int)ChartGetInteger(0,CHART_VISIBLE_BARS);
-   int idx=MathMax(0,first-vis+1);
-   datetime t=iTime(_Symbol,_Period,idx);
+   //--- recreate lines the user may have deleted
+   double de,dsl,dtp;
+   DefaultLevels(gPlanType,de,dsl,dtp);
+   if(ObjectFind(0,TL+"e")<0)               TLine("e",de,C_ENTRY,1,!mkt);
+   if(ObjectFind(0,TL+"sl")<0)              TLine("sl",dsl,C_SELL,2,true);
+   if(gTpOn && ObjectFind(0,TL+"tp")<0)     TLine("tp",dtp,C_BUY,2,true);
 
-   PHLine("pv_e",entry,C_ENTRY,STYLE_DASH);
-   PText("pv_et",t,entry,OrderName(ty)+"  "+DoubleToString(lot,2)+" lot @ "+DoubleToString(entry,dg),C_ENTRY);
+   //--- market entry follows the live price
+   if(mkt) ObjectSetDouble(0,TL+"e",OBJPROP_PRICE,SymbolInfoDouble(_Symbol,buy? SYMBOL_ASK : SYMBOL_BID));
 
-   PHLine("pv_sl",sl,C_SELL,STYLE_DOT);
-   PText("pv_slt",t,sl,"SL "+DoubleToString(sl,dg)+"   "+Money(-risk),C_SELL);
+   double entry,sl,tp;
+   PlanLevels(entry,sl,tp);
 
-   if(tp>0)
+   double slPts=MathAbs(entry-sl)/_Point;
+   double tpPts=(tp>0)? MathAbs(tp-entry)/_Point : 0;
+   double lot=CalcLotPts(slPts);
+   double risk=lot*LossPerLot(slPts);
+   double rew=(tp>0)? lot*ProfitPerLot(tpPts) : 0;
+   double rr=(slPts>0 && tp>0)? tpPts/slPts : 0;
+
+   //--- validity
+   string bad="";
+   if(buy)
      {
-      PHLine("pv_tp",tp,C_BUY,STYLE_DOT);
-      PText("pv_tpt",t,tp,"TP "+DoubleToString(tp,dg)+"   +"+Money(risk*gRR),C_BUY);
+      if(sl>=entry) bad="SL must be below entry";
+      else if(tp>0 && tp<=entry) bad="TP must be above entry";
      }
    else
      {
-      ObjectDelete(0,PFX+"pv_tp");
-      ObjectDelete(0,PFX+"pv_tpt");
+      if(sl<=entry) bad="SL must be above entry";
+      else if(tp>0 && tp>=entry) bad="TP must be below entry";
      }
+   if(bad=="" && !mkt) bad=PendingError(gPlanType,entry);
+
+   //--- zones (TradingView-style risk / reward boxes)
+   TZone("z_sl",entry,sl,InpColZoneSL);
+   if(tp>0) TZone("z_tp",entry,tp,InpColZoneTP);
+   else { ObjectDelete(0,TL+"z_tp"); ObjectDelete(0,TL+"t_tp"); }
+
+   //--- labels
+   TText("t_e",entry,OrderName(gPlanType)+"   "+DoubleToString(lot,2)+" lot"+
+         (rr>0? "   |   R:R "+DoubleToString(rr,2) : ""),C_ENTRY);
+   TText("t_sl",sl,"SL  "+DoubleToString(slPts,0)+" pts   "+Money(-risk),C_SELL);
+   if(tp>0) TText("t_tp",tp,"TP  "+DoubleToString(tpPts,0)+" pts   +"+Money(rew),C_ACCENT);
+
+   //--- panel card
+   SetTxt("v_plan1",OrderName(gPlanType)+"   "+DoubleToString(lot,2)+" lot",bad==""? C_ACCENT : C_WARN);
+   if(bad=="")
+      SetTxt("v_plan2","Risk "+Money(-risk)+"   Reward "+(tp>0? "+"+Money(rew) : "-")+
+             "   R:R "+(rr>0? DoubleToString(rr,2) : "-"),C_TEXT);
+   else
+      SetTxt("v_plan2",bad,C_WARN);
+
+   ChartRedraw();
+  }
+
+void ArmPlan(ENUM_ORDER_TYPE t)
+  {
+   if(!CanTrade()) return;
+   ToolDelete();
+   gPlanType=t;
+   gArmed=true;
+   gTpOn=(gRR>0);
+
+   double e,sl,tp;
+   DefaultLevels(t,e,sl,tp);
+   gPlanEntry=e;
+   bool mkt=(t==ORDER_TYPE_BUY || t==ORDER_TYPE_SELL);
+
+   // make sure there is empty space to the right of the last candle for the zones
+   if(!(bool)ChartGetInteger(0,CHART_SHIFT)) ChartSetInteger(0,CHART_SHIFT,true);
+
+   TLine("e",e,C_ENTRY,1,!mkt);
+   TLine("sl",sl,C_SELL,2,true);
+   if(gTpOn) TLine("tp",tp,C_BUY,2,true);
+
+   SetStatus("Drag the lines, then press PLACE ORDER",C_ENTRY);
+   RefreshPlanUI();
+   UpdateTool();
+  }
+
+void DisarmPlan(bool announce=false)
+  {
+   gArmed=false;
+   ToolDelete();
+   RefreshPlanUI();
+   if(announce) SetStatus("Plan cancelled",C_MUTED);
+   ChartRedraw();
+  }
+
+void ToggleTP()
+  {
+   if(!gArmed) return;
+   gTpOn=!gTpOn;
+   if(gTpOn)
+     {
+      double e,sl,tp;
+      PlanLevels(e,sl,tp);
+      bool buy=IsBuyType(gPlanType);
+      int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+      double d=MathAbs(e-sl);
+      if(d<=0) d=gSL*_Point;
+      double rr=(gRR>0)? gRR : 2.0;
+      TLine("tp",NormalizeDouble(buy? e+d*rr : e-d*rr,dg),C_BUY,2,true);
+     }
+   else
+     {
+      ObjectDelete(0,TL+"tp");
+      ObjectDelete(0,TL+"z_tp");
+      ObjectDelete(0,TL+"t_tp");
+     }
+   RefreshPlanUI();
+   UpdateTool();
+  }
+
+void PlacePlan()
+  {
+   if(!gArmed) { SetStatus("Pick an order type first",C_WARN); return; }
+   double e,sl,tp;
+   PlanLevels(e,sl,tp);
+   if(ExecutePlan(gPlanType,e,sl,tp))
+     {
+      gArmed=false;
+      ToolDelete();
+      RefreshPlanUI();
+      ChartRedraw();
+     }
+  }
+
+//--- BUY / SELL / pending button pressed
+void OrderClick(ENUM_ORDER_TYPE t)
+  {
+   if(gUseTool) ArmPlan(t);
+   else         QuickOrder(t);
   }
 
 //+------------------------------------------------------------------+
@@ -1172,9 +1349,6 @@ void UpdatePanel()
    SetTxt("v_lot",DoubleToString(lot,2)+" lot",C_ACCENT);
    SetTxt("v_rk",Money(riskMoney),C_SELL);
    SetTxt("v_rw",gRR>0? Money(riskMoney*gRR) : "-",C_BUY);
-   SetTxt("v_lot2","Lot "+DoubleToString(lot,2),C_ACCENT);
-   SetTxt("v_rk2","Risk "+Money(riskMoney),C_SELL);
-   SetTxt("v_rw2",gRR>0? "Reward "+Money(riskMoney*gRR) : "No TP",C_BUY);
    SetTxt("v_open",
           "Open "+IntegerToString(CountPositions())+"   Pending "+IntegerToString(CountPendings())+
           "   Max "+IntegerToString(InpMaxPositions)+
@@ -1208,7 +1382,7 @@ void UpdatePanel()
    ObjectSetInteger(0,PFX+"btn_bs",OBJPROP_BGCOLOR,off? dis : C_BSTOP);
    ObjectSetInteger(0,PFX+"btn_ss",OBJPROP_BGCOLOR,off? dis : C_SSTOP);
 
-   UpdatePreview();
+   RefreshPlanUI();
    ChartRedraw();
   }
 
@@ -1223,6 +1397,7 @@ int OnInit()
    gLotFix=InpFixedLot;
    gDist=InpEntryDistance;
    gExpiry=InpExpiryMinutes;
+   gUseTool=InpUseChartTool;
    gPeakEquity=MathMax(AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY));
 
    trade.SetExpertMagicNumber(InpMagic);
@@ -1232,7 +1407,7 @@ int OnInit()
    UpdateStats(true);
    RefreshNews();
    BuildPanel();
-   EventSetTimer(1);
+   EventSetMillisecondTimer(250);
    UpdatePanel();
    return(INIT_SUCCEEDED);
   }
@@ -1254,8 +1429,9 @@ void OnTimer()
   {
    static int cnt=0;
    cnt++;
-   if(cnt>=30) { cnt=0; RefreshNews(); }
-   UpdatePanel();
+   if(cnt%120==0) RefreshNews();   // every 30 s
+   UpdateTool();                   // every 250 ms
+   if(cnt%4==0) UpdatePanel();     // every 1 s
   }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,
@@ -1273,7 +1449,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
   {
    if(id==CHARTEVENT_CHART_CHANGE)
      {
-      if(!gMin && gPrev>0) UpdatePreview();
+      UpdateTool();
       return;
      }
 
@@ -1285,19 +1461,22 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
          gTab=(int)StringToInteger(StringSubstr(sparam,StringLen(PFX)+4,1));
          ApplyTab();
         }
-      else if(sparam==PFX+"btn_prev")
+      else if(sparam==PFX+"btn_tool")
         {
-         gPrev=(gPrev+1)%7;
-         ObjectSetString(0,PFX+"btn_prev",OBJPROP_TEXT,"Preview lines: "+PrevLabel());
-         ObjectSetInteger(0,PFX+"btn_prev",OBJPROP_COLOR,gPrev==0? C_MUTED : C_ENTRY);
-         UpdatePreview();
+         gUseTool=!gUseTool;
+         ObjectSetString(0,PFX+"btn_tool",OBJPROP_TEXT,gUseTool? "Chart tool (drag SL / TP): ON" : "Chart tool (drag SL / TP): OFF");
+         ObjectSetInteger(0,PFX+"btn_tool",OBJPROP_COLOR,gUseTool? C_ENTRY : C_MUTED);
+         if(!gUseTool && gArmed) DisarmPlan();
         }
-      else if(sparam==PFX+"btn_buy")   OpenTrade(true);
-      else if(sparam==PFX+"btn_sell")  OpenTrade(false);
-      else if(sparam==PFX+"btn_bl")    OpenPending(ORDER_TYPE_BUY_LIMIT);
-      else if(sparam==PFX+"btn_sl")    OpenPending(ORDER_TYPE_SELL_LIMIT);
-      else if(sparam==PFX+"btn_bs")    OpenPending(ORDER_TYPE_BUY_STOP);
-      else if(sparam==PFX+"btn_ss")    OpenPending(ORDER_TYPE_SELL_STOP);
+      else if(sparam==PFX+"btn_place")  PlacePlan();
+      else if(sparam==PFX+"btn_cancel") { if(gArmed) DisarmPlan(true); }
+      else if(sparam==PFX+"btn_tp")     ToggleTP();
+      else if(sparam==PFX+"btn_buy")    OrderClick(ORDER_TYPE_BUY);
+      else if(sparam==PFX+"btn_sell")   OrderClick(ORDER_TYPE_SELL);
+      else if(sparam==PFX+"btn_bl")     OrderClick(ORDER_TYPE_BUY_LIMIT);
+      else if(sparam==PFX+"btn_sl")     OrderClick(ORDER_TYPE_SELL_LIMIT);
+      else if(sparam==PFX+"btn_bs")     OrderClick(ORDER_TYPE_BUY_STOP);
+      else if(sparam==PFX+"btn_ss")     OrderClick(ORDER_TYPE_SELL_STOP);
       else if(sparam==PFX+"btn_close") CloseAll();
       else if(sparam==PFX+"btn_cw")    CloseByProfit(true);
       else if(sparam==PFX+"btn_cl")    CloseByProfit(false);
@@ -1307,6 +1486,24 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       else return;
       ObjectSetInteger(0,sparam,OBJPROP_STATE,false);
       UpdatePanel();
+     }
+   else if(id==CHARTEVENT_OBJECT_DRAG)
+     {
+      if(!gArmed || StringFind(sparam,TL)!=0) return;
+      if(sparam==TL+"e")
+        {
+         // dragging the entry moves SL and TP with it (distances stay the same)
+         int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+         double ne=NormalizeDouble(ObjectGetDouble(0,sparam,OBJPROP_PRICE),dg);
+         double d=ne-gPlanEntry;
+         if(MathAbs(d)>0)
+           {
+            if(ObjectFind(0,TL+"sl")>=0) ObjectSetDouble(0,TL+"sl",OBJPROP_PRICE,NormalizeDouble(TLinePrice("sl")+d,dg));
+            if(gTpOn && ObjectFind(0,TL+"tp")>=0) ObjectSetDouble(0,TL+"tp",OBJPROP_PRICE,NormalizeDouble(TLinePrice("tp")+d,dg));
+           }
+         gPlanEntry=ne;
+        }
+      UpdateTool();
      }
    else if(id==CHARTEVENT_OBJECT_ENDEDIT)
      {
